@@ -111,12 +111,12 @@ pub trait UnicodeWidthChar {
 impl UnicodeWidthChar for char {
     #[inline]
     fn width(self) -> Option<usize> {
-        cw::width(self, false)
+        cw::width(self, false, cw::Following::Default).0
     }
 
     #[inline]
     fn width_cjk(self) -> Option<usize> {
-        cw::width(self, true)
+        cw::width(self, true, cw::Following::Default).0
     }
 }
 
@@ -161,17 +161,9 @@ impl UnicodeWidthStr for str {
 
 fn str_width(s: &str, is_cjk: bool) -> usize {
     s.chars()
-        .rfold((0, false), |(sum, was_fe0f), c| {
-            if c == '\u{FE0F}' {
-                (sum, true)
-            } else {
-                let add = if was_fe0f && cw::starts_emoji_presentation_seq(c) {
-                    2
-                } else {
-                    cw::width(c, is_cjk).unwrap_or(0)
-                };
-                (sum + add, false)
-            }
+        .rfold((0, cw::Following::Default), |(sum, following), c| {
+            let (width, following) = cw::width(c, is_cjk, following);
+            (sum + width.unwrap_or(0), following)
         })
         .0
 }

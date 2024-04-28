@@ -31,7 +31,7 @@ import urllib.request
 from collections import defaultdict
 from itertools import batched
 
-UNICODE_VERSION = "15.1.0"
+UNICODE_VERSION = "16.0.0"
 """The version of the Unicode data files to download."""
 
 NUM_CODEPOINTS = 0x110000
@@ -545,7 +545,7 @@ pub mod charwidth {
     /// Emoji presentation sequences are considered to have width 2.
     /// This may spuriously return `true` or `false` for characters that are always wide.
     #[inline]
-    pub fn starts_emoji_presentation_seq(c: char) -> bool {
+    fn starts_emoji_presentation_seq(c: char) -> bool {
         let cp: u32 = c.into();
         // First level of lookup uses all but 10 LSB
         let top_bits = cp >> 10;
@@ -571,29 +571,82 @@ pub mod charwidth {
 
         module.write(
             """
+    /// Information about the following character, used by `width`.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub enum Following {
+        /// Following character was '\\u{FE00}'
+        VariationSelector1 = 0x00,
+
+        /// Following character was '\\u{FE01}'
+        VariationSelector2 = 0x01,
+
+        /// Following character was '\\u{FE0F}'
+        EmojiPresentationSelector = 0x0F,
+
+        /// Following character was a Kirat Rai vowel sign
+        /// (`'\\u{16D63}' | '\\u{16D67}'..='\\u{16D6A}'`)
+        KiratRaiVowelSign = 0x6D,
+
+        #[default]
+        Default,
+    }
+
     /// Returns the [UAX #11](https://www.unicode.org/reports/tr11/) based width of `c`, or
     /// `None` if `c` is a control character other than `'\\x00'`.
     /// If `is_cjk == true`, ambiguous width characters are treated as double width; otherwise,
     /// they're treated as single width.
+    ///
+    /// `following` represents information about the subsequent character in the sequence.
     #[inline]
-    pub fn width(c: char, is_cjk: bool) -> Option<usize> {
-        if c < '\\u{7F}' {
-            if c >= '\\u{20}' {
-                // U+0020 to U+007F (exclusive) are single-width ASCII codepoints
-                Some(1)
-            } else if c == '\\0' {
-                // U+0000 *is* a control code, but it's special-cased
-                Some(0)
-            } else {
-                // U+0001 to U+0020 (exclusive) are control codes
-                None
-            }
-        } else if c >= '\\u{A0}' {
-            // No characters >= U+00A0 are control codes, so we can consult the lookup tables
-            Some(lookup_width(c, is_cjk))
+    pub fn width(c: char, is_cjk: bool, following: Following) -> (Option<usize>, Following) {
+        if following == Following::EmojiPresentationSelector && starts_emoji_presentation_seq(c) {
+            (Some(2), Following::Default)
         } else {
-            // U+007F to U+00A0 (exclusive) are control codes
-            None
+            match c {
+                // ASCII fast-path
+                ..='\\u{7E}' => {
+                    if c >= '\\u{20}' {
+                        // U+0020 to U+007F (exclusive) are single-width ASCII codepoints
+                        (Some(1), Following::Default)
+                    } else if c == '\\0' {
+                        // U+0000 *is* a control code, but it's special-cased
+                        (Some(0), Following::Default)
+                    } else {
+                        // U+0001 to U+0020 (exclusive) are control codes
+                        (None, Following::Default)
+                    }
+                }
+
+                // Variation selectors can affect width of the preceding character
+                '\\u{FE00}' => (Some(0), Following::VariationSelector1),
+                '\\u{FE01}' => (Some(0), Following::VariationSelector2),
+                '\\u{FE0F}' => (Some(0), Following::EmojiPresentationSelector),
+
+                // Single and double quotation marks have variation sequences
+                // for unambiguously specifying width
+                '\\u{2018}' | '\\u{2019}' | '\\u{201C}' | '\\u{201D}' => match following {
+                    Following::VariationSelector1 => (Some(1), Following::Default),
+                    Following::VariationSelector2 => (Some(2), Following::Default),
+                    _ if is_cjk => (Some(2), Following::Default),
+                    _ => (Some(1), Following::Default),
+                },
+
+                // A sequence of Kirat Rai vowel signs has width 1, no matter the number of signs
+                '\\u{16D63}' | '\\u{16D67}'..='\\u{16D6A}' => {
+                    let width = if following == Following::KiratRaiVowelSign {
+                        0
+                    } else {
+                        1
+                    };
+                    (Some(width), Following::KiratRaiVowelSign)
+                }
+
+                // No characters >= U+00A0 are control codes, so we can consult the lookup tables
+                '\\u{A0}'.. => (Some(lookup_width(c, is_cjk)), Following::Default),
+
+                // U+007F to U+00A0 (exclusive) are control codes
+                _ => (None, Following::Default),
+            }
         }
     }
 """
